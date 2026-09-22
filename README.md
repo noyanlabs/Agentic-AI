@@ -15,3 +15,5 @@ To Do List:
 - [ ] GUI Application (Web Based)
 - [ ] Testing and Improvements
 - [ ] Finalizing
+
+0% Progress --------------------
