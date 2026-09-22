@@ -7,7 +7,7 @@ The Agent can be accessed in two ways:
 
 ### To Do List:
 - [ ] **Central Backend** - Acts as the primary execution engine (Rule based or Deep Learning Based)
-- [ ] **Collection of LLMs** - Acting as different parts of a brain to process various types of received data. (Managing which LLM to use when whithout needing to swap LLMs)
+- [x] **Collection of LLMs** - Acting as different parts of a brain to process various types of received data. (Managing which LLM to use when whithout needing to swap LLMs)
 - [ ] **Interpreter** - It interprets meaning from the documents, images and videos. (long xcel and csv data dealing, video dealing)
 - [ ] **Sandbox** - It helps executing code to do a variety of tasks like creating PPT, DOCUMENT, PDF, XCEL, CSV, etc and doing some calculations.
 - [ ] **Safety Net for Sudden Power-cuts.**
@@ -25,4 +25,4 @@ The Agent can be accessed in two ways:
 |**Jairaj**|Interpreter|
 |**Mujtaba**|Interpreter|
 
-0% Progress --------------------
+5% Progress =-------------------
