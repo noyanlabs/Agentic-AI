@@ -1,5 +1,8 @@
 # .gitignore
 *
 !Blueprint
-!LocalStorage
+!ProjectBackend/LocalStorage
 !README.md
+!GUI
+!ProjectBackend
+!cli.py

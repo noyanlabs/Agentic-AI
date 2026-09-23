@@ -1,6 +1,36 @@
 # Agentic-AI
 A **privacy-first** AI agent designed for **long-horizon**, **confidential tasks**. It runs entirely **locally** on your own server, **without internet** access, ensuring **secure data processing** and **efficient performance** even on low-spec hardware.
 
+## Project Structure
+```
+GitHub Repository
+AgenticAI/
+├── Blueprint/
+│   ├── Blueprint of SIH26117.pdf
+│   ├── blueprint_implementation.ipynb
+│   └── sample_qwen_output.json
+├── ProjectBackend/
+│   ├── Interpreter/                    <---- I
+│   │   ├── ppt_interpreter.py
+│   │   ├── docx_interpreter.py
+│   │   ├── xcel_interpreter.py
+│   │   ├── csv_interpreter.py
+│   │   ├── pdf_interpreter.py
+│   │   ├── zip_interpreter.py
+│   │   ├── image_and_encoded_image_interpreter.py
+│   │   └── video_interpreter.py
+│   ├── LLM/                            <---- L
+│   │   └── Qwen3.5-9B-Q4_K_M.gguf
+│   ├── LocalStorage/                   <---- S
+│   ├── central_backend.py              <---- B
+│   └── sandbox.py                      <---- C
+├── GUI/                                <---- F
+├── cli.py                              <---- F
+└── README.md
+```
+_To see what these **I, L, S, B, C & F** represents, see the **"Blueprint of SIH26117.pdf"**._
+
+
 The Agent can be accessed in two ways:
 1. **CLI**
 2. **GUI**
