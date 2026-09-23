@@ -5,4 +5,8 @@
 !README.md
 !GUI
 !ProjectBackend/
+!ProjectBackend/Interpreter
+!ProjectBackend/LLM
+!ProjectBackend/central_backend.py
+!ProjectBackend/sandbox.py
 !cli.py
