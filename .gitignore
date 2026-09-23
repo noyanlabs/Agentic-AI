@@ -1,7 +1,5 @@
 # .gitignore
 *
-!.idea
-!.venv
-!DS_store
-!sample
-!.gitignore
+!Blueprint
+!LocalStorage
+!README.md
