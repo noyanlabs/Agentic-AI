@@ -4,5 +4,5 @@
 !ProjectBackend/LocalStorage
 !README.md
 !GUI
-!ProjectBackend
+!ProjectBackend/
 !cli.py
