@@ -10,4 +10,11 @@
 !ProjectBackend/central_backend.py
 !ProjectBackend/sandbox.py
 !ProjectBackend/Interpreter/ppt_interpreter.py
+!ProjectBackend/Interpreter/docx_interpreter.py
+!ProjectBackend/Interpreter/xcel_interpreter.py
+!ProjectBackend/Interpreter/csv_interpreter.py
+!ProjectBackend/Interpreter/pdf_interpreter.py
+!ProjectBackend/Interpreter/zip_interpreter.py
+!ProjectBackend/Interpreter/image_and_encoded_image_interpreter.py
+!ProjectBackend/Interpreter/video_interpreter.py
 !cli.py
