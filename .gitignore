@@ -1,0 +1,6 @@
+# .gitignore
+*
+!.idea
+!.venv
+!DS_store
+!.gitignore
