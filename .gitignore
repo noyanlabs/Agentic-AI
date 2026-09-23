@@ -6,7 +6,11 @@
 !GUI
 !ProjectBackend/
 !ProjectBackend/Interpreter
-!ProjectBackend/LLM
+!ProjectBackend/LLM/
+!ProjectBackend/LLM/dummy.gguf
+!ProjectBackend/LocalStorage/dummy.docx
+!ProjectBackend/LocalStorage/dummy.pdf
+!ProjectBackend/LocalStorage/dummy.ppt
 !ProjectBackend/central_backend.py
 !ProjectBackend/sandbox.py
 !ProjectBackend/Interpreter/ppt_interpreter.py
