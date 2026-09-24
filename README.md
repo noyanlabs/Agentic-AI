@@ -23,6 +23,7 @@ AgenticAI/
 │   │   └── Qwen3.5-9B-Q4_K_M.gguf
 │   ├── LocalStorage/                   <---- S
 │   ├── central_backend.py              <---- B
+│   ├── server.py
 │   └── sandbox.py                      <---- C
 ├── GUI/                                <---- F
 ├── cli.py                              <---- F
@@ -30,6 +31,7 @@ AgenticAI/
 ```
 _To see what these **I, L, S, B, C & F** represents, see the **"Blueprint of SIH26117.pdf"**._
 
+`User (CLI, GUI) <---> Server (Python) <---> Central Backend (Python)`
 
 The Agent can be accessed in two ways:
 1. **CLI**
@@ -55,4 +57,4 @@ The Agent can be accessed in two ways:
 |**Jairaj**|Interpreter|
 |**Mujtaba**|Interpreter|
 
-35% Progress ======--------------
+45% Progress ========------------

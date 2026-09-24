@@ -5,6 +5,9 @@
 !README.md
 !GUI
 !ProjectBackend/
+!ProjectBackend/AgentHistory
+!ProjectBackend/AgentHistory/dummy.json
+!ProjectBackend/server.py
 !ProjectBackend/Interpreter
 !ProjectBackend/LLM/
 !ProjectBackend/LLM/dummy.gguf
