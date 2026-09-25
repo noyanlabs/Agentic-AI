@@ -28,3 +28,4 @@
 !ProjectBackend/Interpreter/image_and_encoded_image_interpreter.py
 !ProjectBackend/Interpreter/video_interpreter.py
 !cli.py
+!start.py

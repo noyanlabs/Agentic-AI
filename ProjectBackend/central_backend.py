@@ -29,6 +29,7 @@ INTERNAL_DIRS = {".interpreted", ".packages"}          # hidden working folders 
 CONTEXT_WINDOW = 100000
 MIN_CONTEXT_WINDOW = 8192
 MAX_OUTPUT_TOKENS = 5000
+MAX_DECODE_RETRIES = 2      # how many times a full context reset is attempted after a KV-cache/decode failure before giving up
 NUDGE_WINDOW_SECONDS = 8
 PERMISSION_TIMEOUT_SECONDS = 300
 READ_LIMIT_CHARS = 20000
@@ -341,12 +342,15 @@ def _rel(p: Path) -> str:
     return r or "."
 
 
+NOISE_DIRS = {"Caches", "__pycache__", "node_modules", ".git", ".venv", "venv", "site-packages", ".Trash", "Trash", ".cache"}
+
+
 def _visible_files() -> list:
-    # all user files (hidden folders such as .interpreted and .packages, and the metadata file itself, are excluded)
+    # all user files (hidden folders such as .interpreted and .packages, cache/build noise, and the metadata file itself, are excluded)
     files = []
     for f in STORAGE.rglob("*"):
         parts = f.relative_to(STORAGE).parts
-        if f.is_file() and not any(part in INTERNAL_DIRS for part in parts) and f.name != METADATA_FILE:
+        if f.is_file() and not any(part in INTERNAL_DIRS or part in NOISE_DIRS for part in parts) and f.name != METADATA_FILE:
             files.append(f)
     return files
 
@@ -738,12 +742,16 @@ def run_batch(sess: Session, tasks: list) -> list:
     return results
 
 
+MAX_GAP_PATHS_SHOWN = 10   # keeps a huge cache/junk folder from bloating every single prompt
+
+
 def workspace_notes() -> str:
     # Injected at the end of every user turn so the LLM always sees fresh information about the metadata index.
     files, gaps, meta = _visible_files(), metadata_gaps(), load_metadata()
     note = f"[WORKSPACE STATUS] {len(files)} file(s) in LocalStorage. Metadata index: {'present, ' + str(len(meta)) + ' entries' if meta else 'NOT created yet'}."
     if gaps:
-        note += f" MISSING METADATA for {len(gaps)} file(s): {gaps[:25]}{' ...' if len(gaps) > 25 else ''}."
+        shown = gaps[:MAX_GAP_PATHS_SHOWN]
+        note += f" MISSING METADATA for {len(gaps)} file(s), showing first {len(shown)}: {shown}{' ...(use search_files to see the rest, do not list them all)' if len(gaps) > MAX_GAP_PATHS_SHOWN else ''}."
     if meta:
         text = json.dumps(meta, ensure_ascii=False)
         note += "\n[METADATA INDEX]\n" + (text if len(text) <= METADATA_PROMPT_LIMIT else text[:METADATA_PROMPT_LIMIT] + "...[index truncated - use search_files or read_metadata]")
@@ -777,6 +785,7 @@ def run_agent(sess: Session, user_input: str, max_steps: int, temperature: float
     emit(sess, "user", text=user_input)
     sess.context.append({"role": "user", "content": user_input + "\n\n" + workspace_notes() + f"\n[AUTOPILOT: {'ON - the user is away' if sess.autopilot else 'off'}]"})
     steps_since_error = 0
+    decode_failures = 0
     for step in range(1, max_steps + 1):
         if sess.cancelled.is_set():
             emit(sess, "cancelled")
@@ -786,11 +795,26 @@ def run_agent(sess: Session, user_input: str, max_steps: int, temperature: float
         try:
             tasks = ask_model(sess.context, temperature)
         except Exception as e:
-            steps_since_error += 1
+            is_decode_error = "-3" in str(e) or "decode" in str(e).lower()
             emit(sess, "error", text=f"The model produced an unusable answer: {e}")
+            if is_decode_error:
+                decode_failures += 1
+                if decode_failures > MAX_DECODE_RETRIES:
+                    emit(sess, "final", text=f"I stopped because the model kept running out of context space ({e}), even after shrinking the conversation. Your workspace's metadata index may be too large for the current context window - try increasing n_ctx (AGENTICAI_MODEL env / CONTEXT_WINDOW), or reducing the number/size of files in LocalStorage.")
+                    break
+                # A decode failure means the context is (near) full - retrying with the same context only makes it worse.
+                # Keep the system prompt and the ORIGINAL user request (with a fresh, small workspace note), drop everything since.
+                sess.context = sess.context[:2]
+                sess.context.append({"role": "user", "content": f"(Context was reset after a decode error - continuing.) {user_input}\n\n" + workspace_notes()})
+                continue
+            steps_since_error += 1
             if steps_since_error >= 3:
                 emit(sess, "final", text=f"I stopped because the model failed {steps_since_error} times in a row: {e}")
                 break
+            # Drop the failed assistant turn itself before retrying, so the retry note doesn't stack on top of a still-broken context.
+            if sess.context and sess.context[-1]["role"] == "assistant":
+                sess.context.pop()
+            sess.context = trim_context(sess.context)
             sess.context.append({"role": "user", "content": f"Your last output could not be used ({e}). Reply again with a valid, shorter JSON array."})
             continue
         steps_since_error = 0
