@@ -141,32 +141,15 @@ def server_health() -> dict | None:
         return None
 
 
-def _venv_python() -> str:
-    """Return the venv Python interpreter path if it exists, otherwise sys.executable.
-    This is critical: if the user runs `python3 cli.py` with the system Python,
-    sys.executable won't have fastapi/uvicorn/psutil and server.py will crash silently."""
-    # Standard venv layout: <project>/.venv/bin/python  (posix) or .venv/Scripts/python.exe (nt)
-    candidates = [
-        BASE_DIR / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python"),
-        BASE_DIR / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python3.exe" if os.name == "nt" else "python3"),
-    ]
-    for p in candidates:
-        if p.is_file():
-            return str(p)
-    return sys.executable
-
-
 def start_server_process() -> None:
     # Detached background process so closing the CLI does not kill an answer in progress; output goes to a log file, never into the UI.
-    # Always use the venv Python so server.py has access to fastapi, uvicorn, psutil, llama_cpp, etc.
-    python = _venv_python()
     log = open(BACKEND_DIR / "server.log", "ab")
     kwargs = {"cwd": str(BACKEND_DIR), "stdout": log, "stderr": log, "stdin": subprocess.DEVNULL}
     if os.name == "nt":
         kwargs["creationflags"] = 0x00000008 | 0x00000200      # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    subprocess.Popen([python, "server.py"], **kwargs)
+    subprocess.Popen([sys.executable, "server.py"], **kwargs)
 
 
 def ensure_backend() -> bool:
@@ -175,15 +158,12 @@ def ensure_backend() -> bool:
     with console.status("[bold]Starting AgenticAI backend…", spinner="dots") as status:
         if health is None:
             start_server_process()
-            deadline = time.time() + 60          # give the server up to 60 s to bind the port
+            deadline = time.time() + 30
             while health is None and time.time() < deadline:
                 time.sleep(0.4)
                 health = server_health()
             if health is None:
                 console.print("[bold red]The backend server did not start.[/] See ProjectBackend/server.log")
-                log_path = BACKEND_DIR / "server.log"
-                if log_path.stat().st_size > 0:
-                    console.print(Text(log_path.read_text(encoding="utf-8", errors="replace")[-2000:], style="red"))
                 return False
         started = time.time()
         while not health.get("model_loaded"):
@@ -254,122 +234,18 @@ def update_network_state(audit: dict) -> None:
         state["net_denied"] += 1
 
 
-def show_task(event: dict) -> None:  # noqa: C901
-    action = event["action"]
-    icon = ACTION_ICONS.get(action, "•")
+def show_task(event: dict) -> None:
+    icon = ACTION_ICONS.get(event["action"], "•")
     params = event.get("params", {})
-
-    # ── Determine display colour based on risk level ──────────────────────────
-    is_destructive = action in ("delete_path", "move_path")
-    is_write = action in ("write_file", "append_file", "write_metadata", "make_dir")
-    if is_destructive:
-        header_style, border_style_str = "bold red", "red"
-    elif is_write:
-        header_style, border_style_str = "bold yellow", "yellow"
-    else:
-        header_style, border_style_str = "bold", "dim"
-
-    # ── Header line ───────────────────────────────────────────────────────────
-    header = Text.assemble((f" {icon} ", header_style), (action, header_style))
+    detail = params.get("path") or params.get("query") or params.get("command") or params.get("url") or params.get("question") or ""
+    header = Text.assemble((f" {icon} ", "bold"), (event["action"], "bold"), (f"  {str(detail)[:70]}" if detail else "", "dim"))
     console.print(header)
-
-    # ── Model's own explanation ───────────────────────────────────────────────
     if event.get("message"):
         console.print(Text("   " + event["message"], style="italic"))
-
-    # ── Detailed path / parameter block ──────────────────────────────────────
-    lines: list[tuple[str, str]] = []   # (label, value_text)
-
-    rel_path = params.get("path")
-    abs_path = params.get("path_abs")
-    rel_dest = params.get("destination")
-    abs_dest = params.get("destination_abs")
-
-    if action == "delete_path":
-        lines.append(("🗑  DELETING", f"{rel_path}"))
-        if abs_path:
-            lines.append(("   full path", abs_path))
-
-    elif action == "move_path":
-        lines.append(("   from", f"{rel_path}"))
-        if abs_path:
-            lines.append(("   full from", abs_path))
-        lines.append(("   to  ", f"{rel_dest}"))
-        if abs_dest:
-            lines.append(("   full to  ", abs_dest))
-
-    elif action in ("write_file", "append_file"):
-        content = str(params.get("content", ""))
-        lines.append(("   path   ", rel_path or "(?)"))
-        if abs_path:
-            lines.append(("   full path", abs_path))
-        lines.append(("   chars  ", str(len(content))))
-
-    elif action in ("read_file", "read_document"):
-        lines.append(("   path   ", rel_path or "(?)"))
-        if abs_path:
-            lines.append(("   full path", abs_path))
-        if params.get("pages"):
-            lines.append(("   pages  ", str(params["pages"])))
-
-    elif action == "list_dir":
-        lines.append(("   path   ", rel_path or "."))
-        if abs_path:
-            lines.append(("   full path", abs_path))
-
-    elif action == "make_dir":
-        lines.append(("   path   ", rel_path or "(?)"))
-        if abs_path:
-            lines.append(("   full path", abs_path))
-
-    elif action == "search_files":
-        lines.append(("   pattern", str(params.get("pattern", "*"))))
-        if params.get("query"):
-            lines.append(("   query  ", str(params["query"])))
-
-    elif action in ("analyze_image", "analyze_video"):
-        lines.append(("   path   ", rel_path or "(?)"))
-        if abs_path:
-            lines.append(("   full path", abs_path))
-        if params.get("question"):
-            lines.append(("   question", str(params["question"])[:120]))
-
-    elif action == "run_shell":
-        lines.append(("   command", str(params.get("command", ""))[:300]))
-
-    elif action == "network_request":
-        lines.append(("   method ", str(params.get("method", "GET"))))
-        lines.append(("   url    ", str(params.get("url", ""))[:120]))
-
-    elif action == "ask_user":
-        lines.append(("   question", str(params.get("question", ""))[:200]))
-
-    elif action == "query_sql":
-        lines.append(("   db    ", str(params.get("db", ""))))
-        lines.append(("   query ", str(params.get("query", ""))[:200]))
-
-    elif action == "pip_install":
-        packages = params.get("packages", [])
-        lines.append(("   packages", ", ".join(packages) if isinstance(packages, list) else str(packages)))
-
-    # Build a compact info block for all the path/param lines
-    if lines:
-        max_label = max(len(lbl) for lbl, _ in lines)
-        body_parts = []
-        for lbl, val in lines:
-            if is_destructive:
-                body_parts.append(Text.assemble((lbl.ljust(max_label) + "  ", "bold red"), (val, "red")))
-            elif is_write:
-                body_parts.append(Text.assemble((lbl.ljust(max_label) + "  ", "yellow"), (val, "white")))
-            else:
-                body_parts.append(Text.assemble((lbl.ljust(max_label) + "  ", "dim"), (val, "white")))
-        console.print(Panel(Group(*body_parts), border_style=border_style_str, box=box.ROUNDED, padding=(0, 1)))
-
-    # ── Code block for Python/shell ───────────────────────────────────────────
-    if action in ("run_python", "run_shell") and (params.get("code") or params.get("command")):
+    if event["action"] in ("run_python", "run_shell") and (params.get("code") or params.get("command")):
         from rich.syntax import Syntax
         code = params.get("code") or params.get("command")
-        console.print(Panel(Syntax(str(code)[:1500], "python" if params.get("code") else "bash", theme="ansi_dark", word_wrap=True), border_style=border_style_str, box=box.ROUNDED))
+        console.print(Panel(Syntax(str(code)[:1500], "python" if params.get("code") else "bash", theme="ansi_dark", word_wrap=True), border_style="dim", box=box.ROUNDED))
 
 
 def show_result(event: dict) -> None:
@@ -452,9 +328,7 @@ async def handle_event(ws, event: dict, spinner: dict) -> bool:
             console.print(Panel(Text(event.get("text", "error")), border_style="red", title="error"))
         elif kind == "final":
             console.print()
-            # "text" is preferred; fall back to "message" if the model put its answer there
-            display_text = event.get("text") or event.get("message") or ""
-            typewriter(display_text)
+            typewriter(event.get("text", ""))
         elif kind == "cancelled":
             console.print(Text(" ■ stopped", style="bold"))
         elif kind == "autopilot":

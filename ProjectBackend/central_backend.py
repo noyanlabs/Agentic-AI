@@ -26,7 +26,7 @@ MODEL_PATH = Path(os.environ.get("AGENTICAI_MODEL", BASE_DIR / "LLM" / "Qwen3.5-
 MMPROJ_PATH = Path(os.environ.get("AGENTICAI_MMPROJ", BASE_DIR / "LLM" / "mmproj-Qwen3.5-9B.gguf"))
 METADATA_FILE = ".metadata.json"
 INTERNAL_DIRS = {".interpreted", ".packages"}          # hidden working folders the agent should not treat as user files
-CONTEXT_WINDOW = 32768
+CONTEXT_WINDOW = 100000
 MIN_CONTEXT_WINDOW = 8192
 MAX_OUTPUT_TOKENS = 5000
 NUDGE_WINDOW_SECONDS = 8
@@ -93,16 +93,6 @@ ACTIONS (the field names after "message"):
  network_request method, url, [headers], [body]   internet request (needs user approval; never put workspace data in it)
  ask_user        question                  ask the user something and wait for the answer
  final_answer    text                      finish. "text" is shown to the user and may use Markdown and LaTeX ($...$ inline, $$...$$ block). Emit final_answer ALONE in its array.
-
-WHEN TO USE final_answer — THIS IS THE MOST IMPORTANT RULE:
-- ALWAYS end every turn with final_answer. It is MANDATORY. Every response chain must terminate with it.
-- For conversational questions, greetings, math, explanations, general knowledge — use final_answer IMMEDIATELY in your FIRST response. Do NOT call any other tools first.
-- For file/workspace tasks: do the MINIMUM research needed, then call final_answer. Do NOT keep exploring once you have enough to answer.
-- After each tool batch completes, ask yourself: "Can I answer the user now?" If yes → final_answer immediately. If no → do one more focused batch.
-- If you are unsure or stuck, call final_answer and explain what you found. Never loop aimlessly.
-- BAD: list_dir → read_file → list_dir again → read more files → ... (never stopping)
-- GOOD: list_dir + read_metadata → read the one relevant file → final_answer
-- The step limit is 40. If you are past step 5 for a simple question, you are doing something wrong.
 
 WORKSPACE RULES:
 - All paths are relative to LocalStorage. Never use absolute paths or "..".
@@ -722,20 +712,8 @@ def execute(sess: Session, task: dict) -> str:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
-def _resolve_task_paths(task: dict) -> dict:
-    """Return a copy of the task params enriched with resolved absolute paths so the UI can show the user exactly where on disk each operation acts."""
-    params = {k: v for k, v in task.items() if k not in ("action", "message")}
-    for field in ("path", "destination"):
-        if field in params:
-            try:
-                params[f"{field}_abs"] = str(_safe(params[field]))
-            except Exception:
-                params[f"{field}_abs"] = "(path error)"
-    return params
-
-
 def run_task(sess: Session, index: int, task: dict) -> tuple:
-    emit(sess, "task", index=index, action=task["action"], message=task.get("message", ""), params=_resolve_task_paths(task))
+    emit(sess, "task", index=index, action=task["action"], message=task.get("message", ""), params={k: v for k, v in task.items() if k not in ("action", "message")})
     started = time.time()
     output = execute(sess, task)
     emit(sess, "result", index=index, action=task["action"], output=output[:READ_LIMIT_CHARS], seconds=round(time.time() - started, 2))
@@ -773,88 +751,16 @@ def workspace_notes() -> str:
     return note
 
 
-def _extract_json_array(text: str) -> list:
-    """Pull the first valid JSON array out of a free-form model response.
-    Qwen3.5 may wrap it in <think>...</think> or add commentary around it."""
-    # Strip think blocks first
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    # Find the outermost [ ... ] that parses as a list
-    start = text.find("[")
-    if start == -1:
-        raise ValueError("no JSON array found in model output")
-    depth, in_str, escape = 0, False, False
-    for i, ch in enumerate(text[start:], start):
-        if escape:
-            escape = False
-            continue
-        if ch == "\\" and in_str:
-            escape = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth -= 1
-            if depth == 0:
-                return json.loads(text[start:i + 1])
-    raise ValueError("unterminated JSON array in model output")
-
-
 def ask_model(context: list, temperature: float) -> list:
-    # Qwen3.5 is a thinking model. Its chat template prepends <think>\n\n</think>\n\n
-    # before actual generation. Using a grammar at the same time suppresses all
-    # chain-of-thought reasoning, which makes the model unable to decide when to
-    # stop and call final_answer. Fix: call WITHOUT grammar so the model can think,
-    # then extract the JSON array from the free-form response.
-    # If free-form parsing fails twice we fall back to the grammar-constrained call.
-    last_err = None
-    for attempt in range(2):
-        with model_lock:
-            out = qwen.create_chat_completion(
-                messages=context,
-                temperature=temperature,
-                max_tokens=MAX_OUTPUT_TOKENS,
-            )
-        raw = out["choices"][0]["message"]["content"]
-        finish = out["choices"][0].get("finish_reason")
-        if finish == "length":
-            raise ValueError("model output was cut off (too long); ask for smaller steps")
-        try:
-            tasks = _extract_json_array(raw)
-            if not isinstance(tasks, list) or not tasks:
-                raise ValueError("model returned an empty or non-list JSON value")
-            # Validate every task has a known action
-            for t in tasks:
-                if not isinstance(t, dict) or "action" not in t:
-                    raise ValueError(f"task missing 'action' key: {t}")
-                if t["action"] not in ACTION_NAMES:
-                    raise ValueError(f"unknown action: {t['action']}")
-            context.append({"role": "assistant", "content": raw})
-            return tasks
-        except Exception as e:
-            last_err = e
-            continue
-    # Both free-form attempts failed — fall back to grammar-constrained call
+    # One constrained LLM call. The grammar guarantees a valid JSON array of tasks, so parsing never fails on syntax.
     with model_lock:
-        out = qwen.create_chat_completion(
-            messages=context,
-            grammar=load_grammar(ACTION_GRAMMAR),
-            temperature=temperature,
-            max_tokens=MAX_OUTPUT_TOKENS,
-        )
+        out = qwen.create_chat_completion(messages=context, grammar=load_grammar(ACTION_GRAMMAR), temperature=temperature, max_tokens=MAX_OUTPUT_TOKENS)
     raw = out["choices"][0]["message"]["content"]
+    context.append({"role": "assistant", "content": raw})
+    tasks = json.loads(raw)
     finish = out["choices"][0].get("finish_reason")
     if finish == "length":
         raise ValueError("model output was cut off (too long); ask for smaller steps")
-    try:
-        tasks = json.loads(raw)
-    except Exception:
-        raise ValueError(f"model output is not valid JSON after grammar fallback. Last free-form error: {last_err}")
-    context.append({"role": "assistant", "content": raw})
     return tasks
 
 
@@ -890,21 +796,14 @@ def run_agent(sess: Session, user_input: str, max_steps: int, temperature: float
         steps_since_error = 0
         final = next((t for t in tasks if t["action"] == "final_answer"), None)
         if final:
-            # Model sometimes puts the answer in "message" (required) instead of "text" (optional).
-            # Use "text" if present and non-empty, otherwise fall back to "message".
-            answer_text = str(final.get("text") or final.get("message") or "")
-            emit(sess, "final", text=answer_text, message=final.get("message", ""))
+            emit(sess, "final", text=str(final.get("text", "")), message=final.get("message", ""))
             break
         results = run_batch(sess, tasks)
         if sess.cancelled.is_set():
             emit(sess, "cancelled")
             break
         nudges = nudge_window(sess)
-        results_msg = build_results_message(results, nudges, sess)
-        # Inject a step-count warning so the model knows it's running long and must wrap up
-        if step >= 6:
-            results_msg += f"\n\n[STEP WARNING: You are on step {step} of {max_steps}. If you have enough information to answer the user, call final_answer NOW. Do not do more steps than necessary.]"
-        sess.context.append({"role": "user", "content": results_msg})
+        sess.context.append({"role": "user", "content": build_results_message(results, nudges, sess)})
         save_session(sess)
     else:
         emit(sess, "final", text=f"I reached the step limit ({max_steps}) before finishing. Send another message to continue from here.")
