@@ -5,6 +5,9 @@
 !README.md
 !GUI
 !ProjectBackend/
+!ProjectBackend/Interpreter/__init__.py
+!ProjectBackend/Interpreter/math_utils.py
+!ProjectBackend/Interpreter/sql_utils.py
 !ProjectBackend/AgentHistory
 !ProjectBackend/AgentHistory/dummy.json
 !ProjectBackend/server.py
