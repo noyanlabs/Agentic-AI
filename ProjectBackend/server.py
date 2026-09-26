@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 from contextlib import asynccontextmanager
 
-import central_backend
+from ProjectBackend import central_backend
 
 BASE_DIR = Path(__file__).resolve().parent
 GUI_BUILD = BASE_DIR.parent / "GUI" / "build" / "web"

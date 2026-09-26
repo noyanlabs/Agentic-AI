@@ -11,36 +11,44 @@ import shutil
 import threading
 import time
 import uuid
+import sys
 
 from llama_cpp import Llama, LlamaGrammar
 
-import sandbox
-import Interpreter
-from Interpreter.sql_utils import run_select
-from Interpreter.image_and_encoded_image_interpreter import prepare as prepare_image
+from ProjectBackend import sandbox
+from ProjectBackend import Interpreter
+from ProjectBackend.Interpreter.sql_utils import run_select
+from ProjectBackend.Interpreter.image_and_encoded_image_interpreter import prepare as prepare_image
 
 BASE_DIR = Path(__file__).resolve().parent
-STORAGE = BASE_DIR / "LocalStorage"
+STORAGE = (BASE_DIR / "LocalStorage").resolve()
 HISTORY = BASE_DIR / "AgentHistory"
-MODEL_PATH = Path(os.environ.get("AGENTICAI_MODEL", BASE_DIR / "LLM" / "Qwen3.5-9B-Q4_K_M.gguf"))
+def _find_default_model() -> Path:
+    # ori = BASE_DIR / "LLM" / "oriQwen3.5-9B-Q4_K_M.gguf"
+    # if ori.is_file():
+    #     return ori
+    return BASE_DIR / "LLM" / "Qwen3.5-9B-Q4_K_M.gguf"
+
+MODEL_PATH = Path(os.environ.get("AGENTICAI_MODEL", _find_default_model()))
 MMPROJ_PATH = Path(os.environ.get("AGENTICAI_MMPROJ", BASE_DIR / "LLM" / "mmproj-Qwen3.5-9B.gguf"))
 METADATA_FILE = ".metadata.json"
 INTERNAL_DIRS = {".interpreted", ".packages"}          # hidden working folders the agent should not treat as user files
-CONTEXT_WINDOW = 100000
+CONTEXT_WINDOW = int(os.environ.get("AGENTICAI_CTX", "50000"))
 MIN_CONTEXT_WINDOW = 8192
 MAX_OUTPUT_TOKENS = 5000
 MAX_DECODE_RETRIES = 2      # how many times a full context reset is attempted after a KV-cache/decode failure before giving up
 NUDGE_WINDOW_SECONDS = 8
 PERMISSION_TIMEOUT_SECONDS = 300
-READ_LIMIT_CHARS = 20000
-METADATA_PROMPT_LIMIT = 30000                           # chars of metadata injected into the prompt each turn
+READ_LIMIT_CHARS = 10000
+METADATA_PROMPT_LIMIT = 6000                            # chars of metadata injected into the prompt each turn (prevents prompt bloat)
 PARALLEL_ACTIONS = {"list_dir", "read_file", "read_document", "read_metadata", "search_files", "query_sql"}
 DESTRUCTIVE_ACTIONS = {"delete_path", "move_path"}
 MAX_PARALLEL = 6
-CONTEXT_SAFETY_RATIO = 0.85                             # start trimming old tool results at this fraction of the window
+CONTEXT_SAFETY_RATIO = 0.90                             # start trimming old tool results at this fraction of the window
 
 qwen = None
 vision_enabled = False
+vision_handler = None
 model_lock = threading.Lock()
 sessions = {}                                           # session_id -> Session
 
@@ -53,12 +61,15 @@ task      ::= "{" ws "\"action\"" ws ":" ws action ws "," ws "\"message\"" ws ":
 action    ::= ''' + " | ".join('"\\"' + a + '\\""' for a in ACTION_NAMES) + r'''
 field     ::= key ws ":" ws value
 key       ::= "\"" [a-z_]+ "\""
-value     ::= string | number | "true" | "false" | "null" | array
-array     ::= "[" ws ( string ( ws "," ws string )* )? ws "]"
+value     ::= string | number | "true" | "false" | "null" | array | object
+object    ::= "{" ws ( member ( ws "," ws member )* )? ws "}"
+member    ::= string ws ":" ws value
+array     ::= "[" ws ( value ( ws "," ws value )* )? ws "]"
 number    ::= "-"? [0-9]+
 string    ::= "\"" ( [^"\\\x00-\x1f] | "\\" ["\\/bfnrtu] )* "\""
 ws        ::= [ \t\n]*
 '''
+
 NAMING_GRAMMAR = r'''
 root      ::= "{" ws "\"name\"" ws ":" ws string ws "}"
 string    ::= "\"" ( [^"\\\x00-\x1f] | "\\" ["\\/bfnrtu] )* "\""
@@ -89,39 +100,106 @@ ACTIONS (the field names after "message"):
  run_shell       command                   run a shell command in the sandbox
  pip_install     packages (array)          install Python packages (needs user approval, internet)
  query_sql       db, query                 run a read-only SELECT on a SQLite database an interpreter created (db = database file name, e.g. "sales.sqlite")
- analyze_image   path, question            look at an image with the vision model
- analyze_video   path, question, [frames]  look at frames sampled evenly from a video with the vision model
+ analyze_image   path, [question]          look at an image with the vision model (ALWAYS supply "path", e.g. "path": "name.png")
+ analyze_video   path, [question], [frames]  look at frames sampled evenly from a video with the vision model (ALWAYS supply "path")
  network_request method, url, [headers], [body]   internet request (needs user approval; never put workspace data in it)
  ask_user        question                  ask the user something and wait for the answer
- final_answer    text                      finish. "text" is shown to the user and may use Markdown and LaTeX ($...$ inline, $$...$$ block). Emit final_answer ALONE in its array.
+ final_answer    text (or message)         finish. Provide your answer in "text" or "message" to the user, using Markdown and LaTeX ($...$ inline, $$...$$ block). Emit final_answer ALONE in its array.
 
 WORKSPACE RULES:
 - All paths are relative to LocalStorage. Never use absolute paths or "..".
-- Start unfamiliar workspaces with a batch: list_dir "." plus read_metadata (and list a few promising folders).
+- When calling analyze_image, analyze_video, read_file, or read_document, ALWAYS explicitly include the "path" field with the exact file name (e.g. {"action": "analyze_image", "message": "...", "path": "photo.png"}). Never omit the "path" field.
+- CONVERSATIONAL MESSAGES: If the user sends a greeting (e.g. "hello", "hi", "how are you") or a simple question that does not require inspecting files, reply IMMEDIATELY with final_answer. Do NOT explore the workspace, read files, or call analyze_image for such messages.
+- For actual task requests (analyze files, write code, find info, etc.), start with a batch: list_dir "." plus read_metadata (and list a few promising folders).
 - The workspace can hold thousands of files. NEVER read everything. Use the METADATA INDEX (shown to you below when it exists) to decide which few files matter, then read only those.
 - If the index is missing or does not cover all files listed in the MISSING METADATA section, ask the user with ask_user for permission to build it, and only then create it: read files through read_document/read_file, summarise each in 1-2 sentences, and write_metadata with the full index (keep existing entries).
 - Never read ppt/docx/xlsx/pdf/zip/images with read_file. Use read_document (or analyze_image/analyze_video) instead.
-- If a pdf/document reports pages that need vision, call analyze_image on the rendered image paths it lists.
+- If a pdf/document reports pages that need vision, call analyze_image on the rendered image paths it lists ONLY IF the user's task actually requires understanding those images.
 - Do not guess file contents. Read first. If a result looks wrong or truncated, say so and try a better approach.
 - Internet is OFF. Only pip_install and network_request can reach it, and the user must approve each. Never send file contents, file names or any workspace data through the network.
-- Be efficient: batch independent tasks, avoid repeating a read you already have, and finish with final_answer once the question is truly answered.
+- Be efficient: batch independent tasks, avoid repeating a read you already have, and finish with final_answer once the question is truly answered, If the user says something simple which doesn't need any extra knowledge, then directly give out the final_answer without running a tool.
+- final_answer must NEVER be combined with any other action in the same array. If you emit final_answer, it must be the ONLY object in the list.
 - If the user sends a NUDGE while you work, treat it as an important correction or extra instruction and adapt immediately."""
 
 SIMPLE_STRING_RULE = r'''string    ::= "\"" ( [^"\\] | "\\" ["\\/bfnrtu] )* "\""'''
 
 
+_GRAMMAR_CACHE: dict[str, LlamaGrammar] = {}
+
+
+def compact_context_history(context: list) -> list:
+    """
+    Production-grade context history compaction:
+    1. Retains full tool outputs for the MOST RECENT turn so fresh data is preserved.
+    2. Strips redundant repeated [WORKSPACE STATUS] and [METADATA INDEX] blocks from older turns.
+    3. Truncates older tool outputs to concise summaries (~300 chars) so historical tool calls
+       remain in memory without cluttering the context window.
+    """
+    if len(context) <= 3:
+        return context
+
+    tool_msg_indices = [
+        i for i, m in enumerate(context)
+        if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].startswith("TOOL RESULTS:")
+    ]
+
+    if len(tool_msg_indices) <= 1:
+        return context
+
+    # Compact all tool result messages EXCEPT the most recent one
+    for idx in tool_msg_indices[:-1]:
+        msg_text = context[idx]["content"]
+
+        # Strip repeated workspace status & metadata index from past turns
+        for marker in ("\n\n[WORKSPACE STATUS]", "[WORKSPACE STATUS]"):
+            if marker in msg_text:
+                msg_text = msg_text.split(marker)[0]
+
+        # Compact long tool result blocks in past messages
+        lines = msg_text.splitlines()
+        compacted_lines = []
+        in_tool_block = False
+        block_chars = 0
+
+        for line in lines:
+            if line.startswith("--- task "):
+                in_tool_block = True
+                block_chars = 0
+                compacted_lines.append(line)
+            elif in_tool_block:
+                if block_chars < 300:
+                    compacted_lines.append(line)
+                    block_chars += len(line)
+                elif block_chars >= 300 and (not compacted_lines or not compacted_lines[-1].endswith("[older output truncated...]")):
+                    compacted_lines.append("... [older output truncated for context efficiency]")
+            else:
+                compacted_lines.append(line)
+
+        context[idx]["content"] = "\n".join(compacted_lines).strip()
+
+    return context
+
+
 def load_grammar(text: str) -> LlamaGrammar:
+    # PERF: LlamaGrammar.from_string() parses and builds a pushdown automaton from the grammar text - not free,
+    # and this was being redone on EVERY single ask_model()/create_name() call even though ACTION_GRAMMAR and
+    # NAMING_GRAMMAR never change after startup. Compile once per distinct grammar text, then reuse the object.
+    cached = _GRAMMAR_CACHE.get(text)
+    if cached is not None:
+        return cached
     # Strict grammar first; if this llama.cpp build rejects the control-character range, fall back to the simpler string rule.
     try:
-        return LlamaGrammar.from_string(text, verbose=False)
+        grammar = LlamaGrammar.from_string(text, verbose=False)
     except Exception:
         relaxed = re.sub(r'^string\s+::=.*$', SIMPLE_STRING_RULE, text, flags=re.MULTILINE)
-        return LlamaGrammar.from_string(relaxed, verbose=False)
+        grammar = LlamaGrammar.from_string(relaxed, verbose=False)
+    _GRAMMAR_CACHE[text] = grammar
+    return grammar
 
 
 def load_model(context_window: int = CONTEXT_WINDOW):
     # Loads Qwen once. Attaches the vision projector if present. If memory runs out the context window is halved until it fits.
-    global qwen, vision_enabled
+    global qwen, vision_enabled, vision_handler
     if qwen is not None:
         return
     handler, vision_enabled = None, False
@@ -134,8 +212,22 @@ def load_model(context_window: int = CONTEXT_WINDOW):
     n_ctx = context_window
     while n_ctx >= MIN_CONTEXT_WINDOW:
         try:
-            qwen = Llama(model_path=str(MODEL_PATH), n_ctx=n_ctx, n_gpu_layers=-1, chat_handler=handler, verbose=False)
-            vision_enabled = handler is not None
+            try:
+                qwen = Llama(model_path=str(MODEL_PATH), n_ctx=n_ctx, n_gpu_layers=-1, flash_attn=True, n_batch=1024, n_ubatch=512, n_threads=os.cpu_count() or 8, chat_handler=None, verbose=False)
+            except Exception:
+                qwen = Llama(model_path=str(MODEL_PATH), n_ctx=n_ctx, n_gpu_layers=-1, chat_handler=None, verbose=False)
+            if handler is not None:
+                try:
+                    handler._init_mtmd_context(qwen)
+                    vision_enabled = True
+                    vision_handler = handler
+                except Exception as ve:
+                    print(f"[backend] Warning: vision projector '{MMPROJ_PATH.name}' is incompatible with model '{MODEL_PATH.name}': {ve}", file=sys.stderr)
+                    vision_enabled = False
+                    vision_handler = None
+            else:
+                vision_enabled = False
+                vision_handler = None
             return
         except Exception as e:
             if n_ctx // 2 < MIN_CONTEXT_WINDOW:
@@ -147,29 +239,59 @@ def context_size() -> int:
     return qwen.n_ctx() if qwen is not None else CONTEXT_WINDOW
 
 
-def count_tokens(messages: list) -> int:
-    text = "".join(m["content"] if isinstance(m["content"], str) else json.dumps(m["content"])[:2000] for m in messages)
+def _msg_tokens(content) -> int:
+    # Token count of a SINGLE message's content. Kept cheap and separate so trim_context (below) never has to
+    # retokenize the whole conversation just to check one message's contribution.
+    text = content if isinstance(content, str) else json.dumps(content)[:2000]
     try:
         return len(qwen.tokenize(text.encode("utf-8"), add_bos=False))
     except Exception:
         return len(text) // 3
 
 
+def count_tokens(messages: list) -> int:
+    # Sum of per-message counts. Still available for callers that want a one-shot total, but trim_context no longer
+    # calls this inside a loop - see the note there for why that was the main slowdown on every single turn.
+    return sum(_msg_tokens(m["content"]) for m in messages)
+
+
 def trim_context(context: list) -> list:
-    # Keeps the system prompt and the first user message forever. If the window is nearly full, old tool results are shrunk (oldest first).
     limit = int(context_size() * CONTEXT_SAFETY_RATIO) - MAX_OUTPUT_TOKENS
+    counts = [_msg_tokens(m["content"]) for m in context]
+    total = sum(counts)
+    if total <= limit:
+        return context
+
+    # 1. Truncate long tool result strings
     for i in range(2, len(context) - 4):
-        if count_tokens(context) <= limit:
+        if total <= limit:
             break
         msg = context[i]
         if msg["role"] == "user" and isinstance(msg["content"], str) and msg["content"].startswith("TOOL RESULTS") and len(msg["content"]) > 400:
-            context[i] = {"role": "user", "content": msg["content"][:300] + "\n...[older result removed to save memory]"}
+            new_content = msg["content"][:300] + "\n...[older result removed to save memory]"
+            context[i] = {"role": "user", "content": new_content}
+            new_count = _msg_tokens(new_content)
+            total += new_count - counts[i]
+            counts[i] = new_count
+
+    # 2. Hard drop oldest user/assistant turns if still exceeding context window
+    while total > limit and len(context) > 4:
+        del context[2]
+        counts.pop(2)
+        total = sum(counts)
+
     return context
+
+
+def fallback_name(user_input: str) -> str:
+    return re.sub(r"\s+", " ", user_input).strip()[:40] or "New session"
 
 
 def create_name(user_input: str) -> str:
     # A separate tiny call so the naming prompt never pollutes the agent's own context.
-    fallback = re.sub(r"\s+", " ", user_input).strip()[:40] or "New session"
+    # NOTE: this still does a real model round-trip and is deliberately NOT called on the hot path anymore -
+    # see rename_session_async below. Kept as a plain sync function so it's easy to call from a background thread.
+    fallback = fallback_name(user_input)
     try:
         with model_lock:
             out = qwen.create_chat_completion(
@@ -180,6 +302,22 @@ def create_name(user_input: str) -> str:
         return name[:60] or fallback
     except Exception:
         return fallback
+
+
+def rename_session_async(sess, user_input: str) -> None:
+    # PERF: create_name() used to be called INLINE, synchronously, before run_agent() started - meaning every
+    # new chat paid a full extra LLM round-trip (its own grammar load, its own prefill/decode) as pure added
+    # latency before the agent even looked at the user's message. The naming call doesn't block anything the
+    # user can see except the session's *label*, so it now runs in a background thread: the session starts
+    # immediately with the cheap fallback_name() title, and a "session" rename event follows once the real
+    # name is ready (usually well before the agent's own first reply, but never blocking it).
+    def worker():
+        name = create_name(user_input)
+        if sess.id in sessions:
+            sess.name = name
+            emit(sess, "session", id=sess.id, name=sess.name, autopilot=sess.autopilot)
+            save_session(sess)
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def history_path(session_id: str) -> Path:
@@ -326,33 +464,58 @@ def nudge_window(sess: Session) -> list:
 
 
 def _safe(rel: str) -> Path:
-    # Every path the LLM gives is resolved against LocalStorage. Absolute paths, "..", and symlink escapes are refused.
-    rel = str(rel or ".").strip().replace("\\", "/")
-    if re.match(r"^([a-zA-Z]:|/|~)", rel):
-        raise PermissionError(f"absolute paths are not allowed: {rel}")
+    # Every path the LLM gives is resolved against LocalStorage.
+    if not rel:
+        rel = "."
+
+    # Clean string, quotes, and backslashes
+    rel_str = str(rel).strip().strip("'\"`").replace("\\", "/")
+
+    # Strip common LLM prefixes
+    if rel_str.startswith("LocalStorage/"):
+        rel_str = rel_str[len("LocalStorage/"):]
+    elif rel_str.startswith("./"):
+        rel_str = rel_str[2:]
+
     root = STORAGE.resolve()
-    p = (root / rel).resolve()
+
+    # If the LLM sent a full absolute path, check if it's actually inside LocalStorage
+    if re.match(r"^([a-zA-Z]:|/|~)", rel_str):
+        p = Path(rel_str).expanduser().resolve()
+    else:
+        p = (root / rel_str).resolve()
+
+    # Security check: ensure path does not escape LocalStorage
     if p != root and root not in p.parents:
         raise PermissionError(f"path escapes LocalStorage: {rel}")
+
     return p
 
 
 def _rel(p: Path) -> str:
-    r = p.resolve().relative_to(STORAGE.resolve()).as_posix()
-    return r or "."
-
+    try:
+        r = p.resolve().relative_to(STORAGE.resolve()).as_posix()
+        return r or "."
+    except ValueError:
+        return p.name
 
 NOISE_DIRS = {"Caches", "__pycache__", "node_modules", ".git", ".venv", "venv", "site-packages", ".Trash", "Trash", ".cache"}
 
-
 def _visible_files() -> list:
-    # all user files (hidden folders such as .interpreted and .packages, cache/build noise, and the metadata file itself, are excluded)
     files = []
-    for f in STORAGE.rglob("*"):
-        parts = f.relative_to(STORAGE).parts
-        if f.is_file() and not any(part in INTERNAL_DIRS or part in NOISE_DIRS for part in parts) and f.name != METADATA_FILE:
-            files.append(f)
+    root = STORAGE.resolve()
+    for f in root.rglob("*"):
+        try:
+            # Ignore hidden files like .DS_Store
+            if f.name.startswith("."):
+                continue
+            parts = f.relative_to(root).parts
+            if f.is_file() and not any(part in INTERNAL_DIRS or part in NOISE_DIRS or part.startswith(".") for part in parts) and f.name != METADATA_FILE:
+                files.append(f)
+        except Exception:
+            continue
     return files
+
 
 
 def do_list_dir(t: dict) -> str:
@@ -369,21 +532,41 @@ def do_list_dir(t: dict) -> str:
 
 
 def do_read_file(t: dict) -> str:
-    p = _safe(t.get("path"))
+    # 1. Try standard keys
+    raw_path = t.get("path") or t.get("file") or t.get("filepath") or t.get("target") or t.get("filename")
+
+    # 2. FALLBACK: If path key is missing, extract backticked filename or standard filename from 'message'
+    if not raw_path and t.get("message"):
+        msg = t["message"]
+        # Look for words ending in file extensions inside the message string (e.g., `README.md` or README.md)
+        match = re.search(r'`?([a-zA-Z0-9_\-\/\.]+\.(md|py|dart|yaml|txt|json|html|css|js|csv))`?', msg)
+        if match:
+            raw_path = match.group(1)
+
+    # 3. If still missing, return error showing available files
+    if not raw_path or str(raw_path).strip() in ("", "None", "."):
+        available = [_rel(f) for f in _visible_files()[:10]]
+        avail_str = ", ".join(available) if available else "none"
+        return f"ERROR: read_file requires a 'path' parameter (e.g. {{\"action\": \"read_file\", \"message\": \"...\", \"path\": \"README.md\"}}). Available files: [{avail_str}]"
+
+    # 4. Execute read
+    try:
+        p = _safe(raw_path)
+    except Exception as e:
+        return f"ERROR: Invalid path '{raw_path}': {e}"
+
     if not p.is_file():
-        return f"ERROR: file not found: {t.get('path')}"
-    if Interpreter.interpreter_for(p):
-        return f"ERROR: '{p.name}' is a {p.suffix} file - use read_document (or analyze_image / analyze_video), not read_file."
+        available = [_rel(f) for f in _visible_files()[:10]]
+        avail_str = ", ".join(available) if available else "none"
+        return f"ERROR: file '{raw_path}' does not exist inside LocalStorage. Available files: [{avail_str}]"
+
     try:
         lines = p.read_text(encoding="utf-8").splitlines()
-    except UnicodeDecodeError:
-        return "ERROR: file is not valid UTF-8 text (binary file)"
-    start, end = max(int(t.get("start", 1) or 1), 1), int(t.get("end", 0) or 0) or len(lines)
-    chunk = "\n".join(lines[start - 1:end])
-    if len(chunk) > READ_LIMIT_CHARS:
-        return chunk[:READ_LIMIT_CHARS] + f"\n...[truncated at {READ_LIMIT_CHARS} chars; file has {len(lines)} lines. Read more with start/end line numbers]"
-    return chunk + (f"\n...[showing lines {start}-{min(end, len(lines))} of {len(lines)}]" if (start > 1 or end < len(lines)) else "")
+    except Exception as e:
+        return f"ERROR reading file '{raw_path}': {e}"
 
+    start, end = max(int(t.get("start", 1) or 1), 1), int(t.get("end", 0) or 0) or len(lines)
+    return "\n".join(lines[start - 1:end])
 
 def do_write_file(t: dict) -> str:
     p = _safe(t.get("path"))
@@ -466,11 +649,13 @@ def load_metadata() -> dict:
         return {}
 
 
-def metadata_gaps() -> list:
-    # files that have no metadata entry, or changed after their entry was written
-    meta = load_metadata()
+def metadata_gaps(files: list = None, meta: dict = None) -> list:
+    # files that have no metadata entry, or changed after their entry was written.
+    # Accepts an already-scanned file list / already-loaded metadata so callers that already have them
+    # (see workspace_notes) don't trigger a second rglob() + stat() pass over LocalStorage.
+    meta = load_metadata() if meta is None else meta
     gaps = []
-    for f in _visible_files():
+    for f in (_visible_files() if files is None else files):
         rel = _rel(f)
         entry = meta.get(rel)
         if not entry:
@@ -492,26 +677,32 @@ def do_read_metadata(t: dict) -> str:
 
 
 def do_write_metadata(t: dict) -> str:
-    raw = t.get("content", "{}")
+    raw = t.get("content")
+    if not raw:
+        return "ERROR: write_metadata requires a 'content' object parameter containing metadata entries (e.g. {\"action\": \"write_metadata\", \"message\": \"...\", \"content\": {\"file.txt\": {\"summary\": \"...\"}}})."
+
     try:
         incoming = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(incoming, dict):
-            raise ValueError("must be a JSON object mapping path -> entry")
+        if not isinstance(incoming, dict) or not incoming:
+            raise ValueError("must be a non-empty JSON object mapping path -> entry")
     except Exception as e:
-        return f"ERROR: invalid metadata JSON: {e}"
+        return f"ERROR: invalid metadata JSON in 'content': {e}"
+
     merged = load_metadata()
     existing_files = {_rel(f): f for f in _visible_files()}
     added = 0
     for rel, entry in incoming.items():
         rel = str(rel).replace("\\", "/")
         if rel not in existing_files:
-            continue                                        # ignore entries for files that do not exist
+            continue
         entry = entry if isinstance(entry, dict) else {"summary": str(entry)}
         f = existing_files[rel]
-        entry.update({"size": f.stat().st_size, "mtime": f.stat().st_mtime, "type": entry.get("type") or f.suffix.lstrip(".") or "file"})
+        entry.update({"size": f.stat().st_size, "mtime": f.stat().st_mtime,
+                      "type": entry.get("type") or f.suffix.lstrip(".") or "file"})
         merged[rel] = entry
         added += 1
-    merged = {k: v for k, v in merged.items() if k in existing_files}      # drop entries of deleted files
+
+    merged = {k: v for k, v in merged.items() if k in existing_files}
     (STORAGE / METADATA_FILE).write_text(json.dumps(merged, indent=1, ensure_ascii=False), encoding="utf-8")
     return f"OK: metadata index now covers {len(merged)} file(s) ({added} written). Remaining gaps: {len(metadata_gaps())}"
 
@@ -555,39 +746,122 @@ def do_query_sql(t: dict) -> str:
 
 
 def vision_ask(images: list, question: str) -> str:
-    if not vision_enabled:
+    if not vision_enabled or vision_handler is None:
         return "ERROR: vision is not available. Place the mmproj file at LLM/mmproj-Qwen3.5-9B.gguf and restart. See the README."
     content = [{"type": "image_url", "image_url": {"url": uri}} for uri in images] + [{"type": "text", "text": question or "Describe this in detail, including any text, numbers, charts and tables you can see."}]
     try:
         with model_lock:
-            out = qwen.create_chat_completion(messages=[{"role": "system", "content": "You are a precise visual analyst. Describe only what you can actually see."},
-                                                        {"role": "user", "content": content}], temperature=0.1, max_tokens=1500)
+            out = vision_handler(llama=qwen, messages=[{"role": "system", "content": "You are a precise visual analyst. Describe only what you can actually see."},
+                                                       {"role": "user", "content": content}], temperature=0.1, max_tokens=1500)
         return out["choices"][0]["message"]["content"].strip()
     except Exception as e:
         return f"ERROR: vision model failed: {e}"
 
 
-def _image_uri_from_path(path_text: str) -> str:
-    p = _safe(path_text) if not Path(str(path_text)).is_absolute() else None
-    if p is None or not p.is_file():
-        # rendered/extracted images from interpreters live in absolute cache paths inside LocalStorage
-        cand = Path(str(path_text)).resolve()
-        if STORAGE.resolve() in cand.parents and cand.is_file():
-            p = cand
-        else:
-            raise PermissionError(f"image not found inside LocalStorage: {path_text}")
-    return prepare_image(p)["data_uri"]
+def _resolve_image_file(target) -> Path | None:
+    if isinstance(target, Path):
+        return target if target.is_file() else None
+    if not target or not str(target).strip():
+        return None
+    raw = str(target).strip().strip("'\"`")
+    if raw.startswith("LocalStorage/"):
+        raw = raw[len("LocalStorage/"):]
+    elif raw.startswith("./"):
+        raw = raw[2:]
+    if not raw:
+        return None
+    if Path(raw).is_absolute():
+        cand = Path(raw).resolve()
+        if (cand == STORAGE.resolve() or STORAGE.resolve() in cand.parents) and cand.is_file():
+            return cand
+    try:
+        cand = _safe(raw)
+        if cand.is_file():
+            return cand
+    except Exception:
+        pass
+    cand = (STORAGE / raw).resolve()
+    if (cand == STORAGE.resolve() or STORAGE.resolve() in cand.parents) and cand.is_file():
+        return cand
+    return None
+
+
+def _extract_image_path(t: dict) -> Path | None:
+    for key in ("path", "image", "image_path", "file", "file_path", "filename", "name", "target", "img"):
+        val = t.get(key)
+        if val:
+            resolved = _resolve_image_file(val)
+            if resolved:
+                return resolved
+
+    message = str(t.get("message", ""))
+    IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"}
+    existing_images = [
+        f for f in STORAGE.rglob("*")
+        if f.is_file() and f.suffix.lower() in IMAGE_EXTS
+        and not any(part in NOISE_DIRS or (part.startswith(".") and part != ".interpreted") for part in f.parts[:-1])
+    ]
+
+    for img in existing_images:
+        rel = _rel(img)
+        if img.name in message or rel in message:
+            return img
+
+    msg_lower = message.lower()
+    for img in existing_images:
+        rel = _rel(img).lower()
+        if img.name.lower() in msg_lower or rel in msg_lower:
+            return img
+
+    quoted_matches = re.findall(r"['\"`]?([a-zA-Z0-9_\- .]+\.(?:png|jpe?g|webp|bmp|gif|tiff))['\"`]?", message, re.IGNORECASE)
+    for match in quoted_matches:
+        resolved = _resolve_image_file(match)
+        if resolved:
+            return resolved
+
+    if len(existing_images) == 1 and not t.get("path"):
+        return existing_images[0]
+
+    return None
+
+
+def _image_uri_from_path(path_text) -> str:
+    resolved = _resolve_image_file(path_text)
+    if not resolved:
+        raise PermissionError(f"image not found inside LocalStorage: {path_text}")
+    return prepare_image(resolved)["data_uri"]
 
 
 def do_analyze_image(t: dict) -> str:
+    img_path = _extract_image_path(t)
+    if not img_path:
+        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"}
+        existing_images = [
+            f.name for f in STORAGE.rglob("*")
+            if f.is_file() and f.suffix.lower() in IMAGE_EXTS
+            and not any(part in NOISE_DIRS or (part.startswith(".") and part != ".interpreted") for part in f.parts[:-1])
+        ]
+        raw_val = t.get("path") or t.get("image") or t.get("file")
+        if raw_val:
+            return f"ERROR: image '{raw_val}' not found inside LocalStorage. Available images: {', '.join(existing_images) if existing_images else 'none'}."
+        else:
+            return f"ERROR: analyze_image requires a 'path' parameter specifying which image to analyze (e.g. 'path': '{existing_images[0] if existing_images else 'image.png'}'). Available images: {', '.join(existing_images) if existing_images else 'none'}."
     try:
-        return vision_ask([_image_uri_from_path(t.get("path"))], t.get("question", ""))
+        return vision_ask([prepare_image(img_path)["data_uri"]], t.get("question", ""))
     except Exception as e:
         return f"ERROR: {e}"
 
 
 def do_analyze_video(t: dict) -> str:
-    p = _safe(t.get("path"))
+    raw = t.get("path") or t.get("video") or t.get("file")
+    if not raw:
+        return "ERROR: analyze_video requires a 'path' parameter specifying the video file."
+    try:
+        p = _safe(str(raw).strip().strip("'\"`"))
+    except Exception as e:
+        return f"ERROR: invalid video path: {e}"
+    if not p.is_file():
+        return f"ERROR: video not found inside LocalStorage: {raw}"
     r = Interpreter.initialize(p, num_frames=int(t.get("frames", 8) or 8))
     if not r["ok"]:
         return f"ERROR: {r['error']}"
@@ -747,7 +1021,12 @@ MAX_GAP_PATHS_SHOWN = 10   # keeps a huge cache/junk folder from bloating every 
 
 def workspace_notes() -> str:
     # Injected at the end of every user turn so the LLM always sees fresh information about the metadata index.
-    files, gaps, meta = _visible_files(), metadata_gaps(), load_metadata()
+    # PERF: this used to call _visible_files() (a full STORAGE.rglob("*") walk) once directly and AGAIN inside
+    # metadata_gaps(), plus load_metadata() a second time inside metadata_gaps() too - so every turn, including
+    # "hello", did two full filesystem walks (with a stat() per file) and parsed the metadata JSON twice, purely
+    # to build one status line. Now the tree is walked once and both results are reused.
+    files, meta = _visible_files(), load_metadata()
+    gaps = metadata_gaps(files=files, meta=meta)
     note = f"[WORKSPACE STATUS] {len(files)} file(s) in LocalStorage. Metadata index: {'present, ' + str(len(meta)) + ' entries' if meta else 'NOT created yet'}."
     if gaps:
         shown = gaps[:MAX_GAP_PATHS_SHOWN]
@@ -783,7 +1062,8 @@ def build_results_message(results: list, nudges: list, sess: Session) -> str:
 def run_agent(sess: Session, user_input: str, max_steps: int, temperature: float) -> None:
     STORAGE.mkdir(parents=True, exist_ok=True)
     emit(sess, "user", text=user_input)
-    sess.context.append({"role": "user", "content": user_input + "\n\n" + workspace_notes() + f"\n[AUTOPILOT: {'ON - the user is away' if sess.autopilot else 'off'}]"})
+    sess.context.append({"role": "user",
+                         "content": user_input + "\n\n" + workspace_notes() + f"\n[AUTOPILOT: {'ON - the user is away' if sess.autopilot else 'off'}]"})
     steps_since_error = 0
     decode_failures = 0
     for step in range(1, max_steps + 1):
@@ -791,7 +1071,11 @@ def run_agent(sess: Session, user_input: str, max_steps: int, temperature: float
             emit(sess, "cancelled")
             break
         emit(sess, "thinking", step=step)
+
+        # Apply context history compaction and window trimming
+        sess.context = compact_context_history(sess.context)
         sess.context = trim_context(sess.context)
+
         try:
             tasks = ask_model(sess.context, temperature)
         except Exception as e:
@@ -800,28 +1084,33 @@ def run_agent(sess: Session, user_input: str, max_steps: int, temperature: float
             if is_decode_error:
                 decode_failures += 1
                 if decode_failures > MAX_DECODE_RETRIES:
-                    emit(sess, "final", text=f"I stopped because the model kept running out of context space ({e}), even after shrinking the conversation. Your workspace's metadata index may be too large for the current context window - try increasing n_ctx (AGENTICAI_MODEL env / CONTEXT_WINDOW), or reducing the number/size of files in LocalStorage.")
+                    emit(sess, "final",
+                         text=f"I stopped because the model kept running out of context space ({e}), even after shrinking the conversation.")
                     break
-                # A decode failure means the context is (near) full - retrying with the same context only makes it worse.
-                # Keep the system prompt and the ORIGINAL user request (with a fresh, small workspace note), drop everything since.
                 sess.context = sess.context[:2]
-                sess.context.append({"role": "user", "content": f"(Context was reset after a decode error - continuing.) {user_input}\n\n" + workspace_notes()})
+                sess.context.append({"role": "user",
+                                     "content": f"(Context was reset after a decode error - continuing.) {user_input}\n\n" + workspace_notes()})
                 continue
             steps_since_error += 1
             if steps_since_error >= 3:
                 emit(sess, "final", text=f"I stopped because the model failed {steps_since_error} times in a row: {e}")
                 break
-            # Drop the failed assistant turn itself before retrying, so the retry note doesn't stack on top of a still-broken context.
             if sess.context and sess.context[-1]["role"] == "assistant":
                 sess.context.pop()
             sess.context = trim_context(sess.context)
-            sess.context.append({"role": "user", "content": f"Your last output could not be used ({e}). Reply again with a valid, shorter JSON array."})
+            sess.context.append({"role": "user",
+                                 "content": f"Your last output could not be used ({e}). Reply again with a valid, shorter JSON array."})
             continue
+
         steps_since_error = 0
         final = next((t for t in tasks if t["action"] == "final_answer"), None)
         if final:
-            emit(sess, "final", text=str(final.get("text", "")), message=final.get("message", ""))
+            t_val = str(final.get("text") or "").strip()
+            m_val = str(final.get("message") or "").strip()
+            final_text = t_val if (t_val and len(t_val) >= len(m_val)) else (m_val or t_val)
+            emit(sess, "final", text=final_text, message=m_val or final_text)
             break
+
         results = run_batch(sess, tasks)
         if sess.cancelled.is_set():
             emit(sess, "cancelled")
@@ -830,7 +1119,8 @@ def run_agent(sess: Session, user_input: str, max_steps: int, temperature: float
         sess.context.append({"role": "user", "content": build_results_message(results, nudges, sess)})
         save_session(sess)
     else:
-        emit(sess, "final", text=f"I reached the step limit ({max_steps}) before finishing. Send another message to continue from here.")
+        emit(sess, "final",
+             text=f"I reached the step limit ({max_steps}) before finishing. Send another message to continue from here.")
     emit(sess, "done")
     save_session(sess)
 
@@ -844,8 +1134,9 @@ def initialize(user_input: str, emit_callback, session_id: str = None, max_steps
         data = load_session_data(session_id)
         if data:
             sess = Session(data["id"], data["name"], data["context"], data.get("autopilot", False), data["created"], data.get("events", []), data.get("network_audit", []))
+    is_new = sess is None
     if sess is None:
-        sess = Session(datetime.now().strftime("%Y%m%d%H%M%S") + uuid.uuid4().hex[:4], create_name(user_input), [{"role": "system", "content": SYSTEM_PROMPT}], autopilot)
+        sess = Session(datetime.now().strftime("%Y%m%d%H%M%S") + uuid.uuid4().hex[:4], fallback_name(user_input), [{"role": "system", "content": SYSTEM_PROMPT}], autopilot)
     with sess.lock:
         if sess.running:
             return sess.id
@@ -855,6 +1146,8 @@ def initialize(user_input: str, emit_callback, session_id: str = None, max_steps
     sessions[sess.id] = sess
     sess.autopilot = autopilot or sess.autopilot
     emit(sess, "session", id=sess.id, name=sess.name, autopilot=sess.autopilot)
+    if is_new:
+        rename_session_async(sess, user_input)   # real title arrives a little later via its own "session" event; never blocks the agent
     try:
         run_agent(sess, user_input, max_steps, temp)
     finally:

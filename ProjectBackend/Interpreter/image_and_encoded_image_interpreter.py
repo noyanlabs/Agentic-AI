@@ -6,7 +6,7 @@ import re
 
 from PIL import Image, ImageOps
 
-from Interpreter import empty_result, error_result
+from ProjectBackend.Interpreter import empty_result, error_result
 
 KIND = "image"
 MAX_SIDE = 1344                 # longest side sent to the vision model (keeps token cost sane)
