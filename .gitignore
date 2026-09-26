@@ -5,9 +5,9 @@
 !README.md
 !GUI
 !GUI/build
-!GUI/build/*
+!GUI/build/**
 !GUI/lib/
-!GUI/lib/*
+!GUI/lib/**
 !ProjectBackend/
 !ProjectBackend/Interpreter/__init__.py
 !ProjectBackend/Interpreter/math_utils.py
