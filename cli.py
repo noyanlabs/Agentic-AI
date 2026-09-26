@@ -170,7 +170,7 @@ def ensure_backend() -> bool:
         while not health.get("model_loaded"):
             status.update(f"[bold]Loading the language model… {int(time.time() - started)}s[/] [dim](first start can take a minute)[/]")
             if time.time() - started > STARTUP_TIMEOUT:
-                console.print("[bold red]Model loading timed out.[/] Check LLM/Qwen3.5-9B-Q4_K_M.gguf and ProjectBackend/server.log")
+                console.print("[bold red]Model loading timed out.[/] Check LLM/main.gguf and ProjectBackend/server.log")
                 return False
             time.sleep(1)
             health = server_health() or health

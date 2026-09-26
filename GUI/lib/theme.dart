@@ -35,8 +35,14 @@ ThemeData buildTheme(Brightness brightness) {
   return ThemeData(
     useMaterial3: true, colorScheme: scheme, scaffoldBackgroundColor: p.background, canvasColor: p.background, dividerColor: p.border,
     splashFactory: InkSparkle.splashFactory,
-    fontFamily: 'Inter', fontFamilyFallback: const ['SF Pro Text', 'Segoe UI', 'Roboto', 'Helvetica', 'Arial'],
-    textTheme: Typography.material2021().black.apply(bodyColor: p.text, displayColor: p.text),
+    fontFamily: 'main', fontFamilyFallback: const ['SF Pro Text', 'Segoe UI', 'Roboto', 'Helvetica', 'Arial'],
+    textTheme: Typography.material2021().black.apply(
+  fontFamily: 'main',
+  fontFamilyFallback: const ['SF Pro Text', 'Segoe UI', 'Roboto', 'Helvetica', 'Arial'],
+  bodyColor: p.text,
+  displayColor: p.text,
+),
+
     pageTransitionsTheme: const PageTransitionsTheme(builders: {
       TargetPlatform.android: FadeUpwardsPageTransitionsBuilder(),
       TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),

@@ -34,7 +34,7 @@ _To see what these **I, L, S, B, C & F** represents, see the **"Blueprint of SIH
 ## How to use this Agent
 
 1. Pull this Github Repo on your computer.
-2. Download your desired LLM in `gguf` format from Hugging Face into the `LLM` dirrectory inside the `ProjectBackend` directory.
+2. Download your desired LLM in `gguf` format from Hugging Face into the `LLM` dirrectory inside the `ProjectBackend` directory, and name the model as `main.gguf` and the vision model as `main_vision.gguf`.
 3. Navigate to the AgenticAI directory in terminal.
 4. Run this command:
 ```bash
@@ -42,6 +42,8 @@ python3 start.py --gui
 ```
 5. It will open the AgenticAI in your Local Browser.
 6. 🎉 Enjoy the Automation, by adding your required files in the `LocalStorage` Directory
+
+_😊We hope that you will definately feel our work..._
 
 `User (CLI, GUI) <---> Server (Python) <---> Central Backend (Python)`
 
@@ -57,8 +59,8 @@ The Agent can be accessed in two ways:
 - [x] **Safety Net for Sudden Power-cuts.**
 - [x] **CLI Application**
 - [x] **GUI Application** (Web Based)
-- [ ] **Testing and Improvements**
-- [ ] **Finalizing**
+- [x] **Testing and Improvements**
+- [x] **Finalizing**
 
 ### Workload Distribution:
 
@@ -69,4 +71,4 @@ The Agent can be accessed in two ways:
 |**Jairaj**|Interpreter|
 |**Mujtaba**|Interpreter|
 
-90% Progress ==================--
+100% Progress ====================

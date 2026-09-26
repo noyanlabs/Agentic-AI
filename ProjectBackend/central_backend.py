@@ -24,13 +24,13 @@ BASE_DIR = Path(__file__).resolve().parent
 STORAGE = (BASE_DIR / "LocalStorage").resolve()
 HISTORY = BASE_DIR / "AgentHistory"
 def _find_default_model() -> Path:
-    # ori = BASE_DIR / "LLM" / "oriQwen3.5-9B-Q4_K_M.gguf"
+    # ori = BASE_DIR / "LLM" / "main.gguf"
     # if ori.is_file():
     #     return ori
-    return BASE_DIR / "LLM" / "Qwen3.5-9B-Q4_K_M.gguf"
+    return BASE_DIR / "LLM" / "main.gguf"
 
 MODEL_PATH = Path(os.environ.get("AGENTICAI_MODEL", _find_default_model()))
-MMPROJ_PATH = Path(os.environ.get("AGENTICAI_MMPROJ", BASE_DIR / "LLM" / "mmproj-Qwen3.5-9B.gguf"))
+MMPROJ_PATH = Path(os.environ.get("AGENTICAI_MMPROJ", BASE_DIR / "LLM" / "main_vision.gguf"))
 METADATA_FILE = ".metadata.json"
 INTERNAL_DIRS = {".interpreted", ".packages"}          # hidden working folders the agent should not treat as user files
 CONTEXT_WINDOW = int(os.environ.get("AGENTICAI_CTX", "50000"))
@@ -763,7 +763,7 @@ def do_query_sql(t: dict) -> str:
 
 def vision_ask(images: list, question: str) -> str:
     if not vision_enabled or vision_handler is None:
-        return "ERROR: vision is not available. Place the mmproj file at LLM/mmproj-Qwen3.5-9B.gguf and restart. See the README."
+        return "ERROR: vision is not available. Place the mmproj file at LLM/main_vision.gguf and restart. See the README."
     content = [{"type": "image_url", "image_url": {"url": uri}} for uri in images] + [{"type": "text", "text": question or "Describe this in detail, including any text, numbers, charts and tables you can see."}]
     try:
         with model_lock:
