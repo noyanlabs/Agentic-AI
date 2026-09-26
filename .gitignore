@@ -2,6 +2,7 @@
 *
 !Blueprint
 !ProjectBackend/LocalStorage
+!ProjectBackend/LocalStorage/LocalStorage.md
 !README.md
 !GUI
 !GUI/build
