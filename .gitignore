@@ -4,6 +4,10 @@
 !ProjectBackend/LocalStorage
 !README.md
 !GUI
+!GUI/build
+!GUI/build/*
+!GUI/lib/
+!GUI/lib/*
 !ProjectBackend/
 !ProjectBackend/Interpreter/__init__.py
 !ProjectBackend/Interpreter/math_utils.py
@@ -14,9 +18,6 @@
 !ProjectBackend/Interpreter
 !ProjectBackend/LLM/
 !ProjectBackend/LLM/dummy.gguf
-!ProjectBackend/LocalStorage/dummy.docx
-!ProjectBackend/LocalStorage/dummy.pdf
-!ProjectBackend/LocalStorage/dummy.ppt
 !ProjectBackend/central_backend.py
 !ProjectBackend/sandbox.py
 !ProjectBackend/Interpreter/ppt_interpreter.py
