@@ -21,6 +21,13 @@ class ChatController extends ChangeNotifier {
   final List<NetworkAudit> audit = [];
   final Map<int, Entry> _resultsByTask = {};
 
+  // Bumped exactly once every time `busy` transitions from true to false (a turn genuinely finishing,
+  // either normally via 'done' or because the connection dropped mid-turn). The chat screen listens for
+  // this to force a clean focus/platform-input-connection reset on the message box after each turn -
+  // see the long comment on _ChatScreenState._onCtrlChange for why that reset is needed at all.
+  int turnEndTick = 0;
+  bool _wasBusy = false;
+
   void reset() {
     sessionId = null;
     sessionName = 'New chat';
@@ -133,6 +140,8 @@ class ChatController extends ChangeNotifier {
         busy = thinking = countdownActive = false;
         break;
     }
+    if (_wasBusy && !busy) turnEndTick++;
+    _wasBusy = busy;
     notifyListeners();
   }
 
@@ -144,10 +153,15 @@ class ChatController extends ChangeNotifier {
   }
 
   void send(String text) {
-    entries.add(Entry(kind: EntryKind.user, text: text));
+    // NOTE: no optimistic local bubble here. The backend always echoes the message straight back as a
+    // 'user' websocket event (see case 'user' below), immediately after (or bundled with) the 'session'
+    // event that opens the turn. Adding a bubble here AND letting that echo add another one is exactly
+    // what produced the "every message shown twice" bug — on live sends the optimistic copy and the
+    // echoed copy both landed in `entries`; on history replay only the echoed copy exists (recorded once
+    // server-side), which is why the bug only showed up live and "healed" on reopen.
     busy = true;
+    notifyListeners(); // flips the input bar into its busy state immediately, before the echo arrives
     backend.sendMessage(text, sessionId, autopilot);
-    notifyListeners();
   }
 
   void answerAsk(Entry entry, String answer) {

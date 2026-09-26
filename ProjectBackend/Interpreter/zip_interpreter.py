@@ -3,7 +3,7 @@ from pathlib import Path
 import zipfile
 import importlib
 
-from Interpreter import empty_result, error_result, interpreter_for, TEXT_EXTENSIONS
+from ProjectBackend.Interpreter import empty_result, error_result, interpreter_for, TEXT_EXTENSIONS
 
 KIND = "zip"
 EXTRACT_ROOT = Path(__file__).resolve().parent.parent / "LocalStorage" / ".interpreted" / "unzipped"
@@ -38,7 +38,7 @@ def _read_inner(file: Path, depth: int, options: dict) -> dict:
         return initialize(file, _depth=depth + 1, **options)
     name = interpreter_for(file)
     if name:
-        return importlib.import_module(f"Interpreter.{name}").initialize(file, **options)
+        return importlib.import_module(f"ProjectBackend.Interpreter.{name}").initialize(file, **options)
     if file.suffix.lower() in TEXT_EXTENSIONS:
         try:
             r = empty_result("text")

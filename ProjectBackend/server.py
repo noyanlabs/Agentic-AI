@@ -5,7 +5,19 @@ import asyncio
 import json
 import os
 import secrets
+import sys
 import threading
+
+# PERMANENT FIX for "ModuleNotFoundError: No module named 'Interpreter'" (and its mirror, 'ProjectBackend'):
+# every module under ProjectBackend/ - including this one, one line below - imports its siblings as
+# "ProjectBackend.xxx", a fully qualified path from the REPO ROOT (the folder that CONTAINS ProjectBackend/,
+# not ProjectBackend/ itself). That only resolves if the repo root is on sys.path. start.py sets this up for
+# anything it launches, but this file can also be run on its own (e.g. `python -m ProjectBackend.server`
+# from an unexpected cwd, or directly by an IDE) without going through start.py first, so the guarantee is
+# repeated here rather than assumed. This repo root is this file's grandparent: server.py -> ProjectBackend/ -> repo root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import FileResponse, JSONResponse

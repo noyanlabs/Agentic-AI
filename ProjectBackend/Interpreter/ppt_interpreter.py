@@ -5,8 +5,8 @@ import hashlib
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-from Interpreter import empty_result, error_result
-from Interpreter.math_utils import find_math
+from ProjectBackend.Interpreter import empty_result, error_result
+from ProjectBackend.Interpreter.math_utils import find_math
 
 KIND = "pptx"
 IMAGE_CACHE = Path(__file__).resolve().parent.parent / "LocalStorage" / ".interpreted" / "images"

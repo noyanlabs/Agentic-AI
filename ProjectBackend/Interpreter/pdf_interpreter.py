@@ -4,7 +4,7 @@ import hashlib
 
 import pymupdf as fitz  # PyMuPDF
 
-from Interpreter import empty_result, error_result
+from ProjectBackend.Interpreter import empty_result, error_result
 
 KIND = "pdf"
 IMAGE_CACHE = Path(__file__).resolve().parent.parent / "LocalStorage" / ".interpreted" / "images"

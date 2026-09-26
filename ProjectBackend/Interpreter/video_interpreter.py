@@ -4,8 +4,8 @@ from pathlib import Path
 import cv2
 from PIL import Image
 
-from Interpreter import empty_result, error_result
-from Interpreter.image_and_encoded_image_interpreter import to_data_uri
+from ProjectBackend.Interpreter import empty_result, error_result
+from ProjectBackend.Interpreter.image_and_encoded_image_interpreter import to_data_uri
 
 KIND = "video"
 DEFAULT_FRAMES = 8

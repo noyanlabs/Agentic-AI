@@ -34,16 +34,36 @@ ThemeData buildTheme(Brightness brightness) {
   );
   return ThemeData(
     useMaterial3: true, colorScheme: scheme, scaffoldBackgroundColor: p.background, canvasColor: p.background, dividerColor: p.border,
+    splashFactory: InkSparkle.splashFactory,
     fontFamily: 'Inter', fontFamilyFallback: const ['SF Pro Text', 'Segoe UI', 'Roboto', 'Helvetica', 'Arial'],
     textTheme: Typography.material2021().black.apply(bodyColor: p.text, displayColor: p.text),
-    dialogTheme: DialogThemeData(backgroundColor: p.surface, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: p.border))),
+    pageTransitionsTheme: const PageTransitionsTheme(builders: {
+      TargetPlatform.android: FadeUpwardsPageTransitionsBuilder(),
+      TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
+      TargetPlatform.linux: FadeUpwardsPageTransitionsBuilder(),
+    }),
+    dialogTheme: DialogThemeData(
+      backgroundColor: p.surface,
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: p.border)),
+    ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true, fillColor: p.surface, hintStyle: TextStyle(color: p.textDim),
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: p.border)),
       enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: p.border)),
       focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: p.inverse, width: 1.2)),
     ),
-    tooltipTheme: TooltipThemeData(decoration: BoxDecoration(color: p.inverse, borderRadius: BorderRadius.circular(6)), textStyle: TextStyle(color: p.onInverse, fontSize: 12)),
-    scrollbarTheme: ScrollbarThemeData(thumbColor: WidgetStatePropertyAll(p.border)),
+    tooltipTheme: TooltipThemeData(
+      decoration: BoxDecoration(color: p.inverse, borderRadius: BorderRadius.circular(8)),
+      textStyle: TextStyle(color: p.onInverse, fontSize: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+    ),
+    scrollbarTheme: ScrollbarThemeData(thumbColor: WidgetStatePropertyAll(p.border.withValues(alpha: 0.8)), radius: const Radius.circular(8)),
+    iconTheme: IconThemeData(color: p.textDim),
+    switchTheme: SwitchThemeData(
+      thumbColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? p.inverse : p.textDim),
+      trackColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? p.inverse.withValues(alpha: 0.35) : p.border),
+      trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
+    ),
   );
 }

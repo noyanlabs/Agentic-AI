@@ -4,8 +4,8 @@ import csv
 
 import pandas as pd
 
-from Interpreter import empty_result, error_result
-from Interpreter.sql_utils import build_database, describe_database, schema_text
+from ProjectBackend.Interpreter import empty_result, error_result
+from ProjectBackend.Interpreter.sql_utils import build_database, describe_database, schema_text
 
 KIND = "csv"
 ENCODINGS = ["utf-8", "utf-8-sig", "latin-1"]

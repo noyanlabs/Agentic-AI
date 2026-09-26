@@ -39,7 +39,12 @@ def initialize(path, **options) -> dict:
         return error_result("unknown", f"file not found: {p.name}")
     name = interpreter_for(p)
     if name:
-        module = importlib.import_module(f"Interpreter.{name}")
+        # Fully-qualified from the repo root, matching every other import in this package (see the note at
+        # the top of the file). A bare "Interpreter.{name}" only resolves when ProjectBackend/ itself is on
+        # sys.path, which is NOT the case for the app's actual launch path (python -m ProjectBackend.server
+        # from the repo root puts the repo root on sys.path, not ProjectBackend/) - that mismatch is exactly
+        # what caused "ModuleNotFoundError: No module named 'Interpreter'".
+        module = importlib.import_module(f"ProjectBackend.Interpreter.{name}")
         return module.initialize(p, **options)
     if p.suffix.lower() in TEXT_EXTENSIONS or p.suffix == "":
         try:

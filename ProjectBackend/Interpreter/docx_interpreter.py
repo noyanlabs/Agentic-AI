@@ -6,8 +6,8 @@ from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from Interpreter import empty_result, error_result
-from Interpreter.math_utils import find_math
+from ProjectBackend.Interpreter import empty_result, error_result
+from ProjectBackend.Interpreter.math_utils import find_math
 
 KIND = "docx"
 IMAGE_CACHE = Path(__file__).resolve().parent.parent / "LocalStorage" / ".interpreted" / "images"

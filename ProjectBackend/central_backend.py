@@ -46,6 +46,26 @@ DESTRUCTIVE_ACTIONS = {"delete_path", "move_path"}
 MAX_PARALLEL = 6
 CONTEXT_SAFETY_RATIO = 0.90                             # start trimming old tool results at this fraction of the window
 
+# Actions whose raw output is bulky/exploratory and gets compressed into a short, task-aware summary before it
+# ever touches sess.context or the user's screen. Everything NOT in this set (writes, sandbox runs, control
+# actions) passes through unchanged - see run_task() / SUMMARIZE_OUTPUT_CHARS_SKIP below.
+SUMMARIZE_ACTIONS = {"read_file", "read_document", "read_metadata", "search_files", "query_sql", "analyze_image", "analyze_video", "list_dir"}
+SUMMARY_MAX_TOKENS = 1500   # bumped from 180 - that was too tight even as a floor, let alone for wordy sources like vision descriptions
+SUMMARY_SKIP_CHARS = 220           # outputs already this short aren't worth a model round-trip; used as-is
+SUMMARY_INPUT_CHARS = 20000        # how much of a huge raw output we actually feed to the summarizer call
+
+SUMMARIZER_SYSTEM_PROMPT = """You compress a tool's raw output into a terse note for another AI agent's memory.
+Not for humans. No grammar, no full sentences, no filler words (a/an/the/is/was). Fragments and keywords only, comma or semicolon separated.
+Keep every concrete fact the agent would need later: numbers, names, paths, headings, counts, key values, structure.
+Drop formatting, boilerplate, and anything irrelevant to WHY the tool was called (given to you as TASK REASON).
+Output ONLY the compressed note, nothing else. Aim for the shortest note that loses no fact relevant to the task reason."""
+
+SUMMARY_GRAMMAR = r'''
+root      ::= "{" ws "\"summary\"" ws ":" ws string ws "}"
+string    ::= "\"" ( [^"\\\x00-\x1f] | "\\" ["\\/bfnrtu] )* "\""
+ws        ::= [ \t\n]*
+'''
+
 qwen = None
 vision_enabled = False
 vision_handler = None
@@ -111,8 +131,9 @@ WORKSPACE RULES:
 - When calling analyze_image, analyze_video, read_file, or read_document, ALWAYS explicitly include the "path" field with the exact file name (e.g. {"action": "analyze_image", "message": "...", "path": "photo.png"}). Never omit the "path" field.
 - CONVERSATIONAL MESSAGES: If the user sends a greeting (e.g. "hello", "hi", "how are you") or a simple question that does not require inspecting files, reply IMMEDIATELY with final_answer. Do NOT explore the workspace, read files, or call analyze_image for such messages.
 - For actual task requests (analyze files, write code, find info, etc.), start with a batch: list_dir "." plus read_metadata (and list a few promising folders).
-- The workspace can hold thousands of files. NEVER read everything. Use the METADATA INDEX (shown to you below when it exists) to decide which few files matter, then read only those.
-- If the index is missing or does not cover all files listed in the MISSING METADATA section, ask the user with ask_user for permission to build it, and only then create it: read files through read_document/read_file, summarise each in 1-2 sentences, and write_metadata with the full index (keep existing entries).
+- The workspace can hold thousands of files. NEVER read everything. The metadata index is NOT shown to you automatically - call read_metadata yourself when you want to know what a file contains before reading it, so you read only the few files that matter. The [WORKSPACE] line each turn only tells you whether an index exists, not what's in it.
+- If read_metadata reports the index is missing or has gaps, ask the user with ask_user for permission to build it, and only then create it: read files through read_document/read_file, summarise each in 1-2 sentences, and write_metadata with the full index (keep existing entries).
+- The output of read_file/read_document/read_metadata/search_files/query_sql/analyze_image/analyze_video/list_dir that you see in TOOL RESULTS is a compressed note, not the raw content - it is written in fragments to save space, not full prose. Trust the facts in it. If it lacks a specific detail you now need, re-read the same file with a narrower request (e.g. a line range or a specific page) rather than assuming the detail doesn't exist.
 - Never read ppt/docx/xlsx/pdf/zip/images with read_file. Use read_document (or analyze_image/analyze_video) instead.
 - If a pdf/document reports pages that need vision, call analyze_image on the rendered image paths it lists ONLY IF the user's task actually requires understanding those images.
 - Do not guess file contents. Read first. If a result looks wrong or truncated, say so and try a better approach.
@@ -129,11 +150,11 @@ _GRAMMAR_CACHE: dict[str, LlamaGrammar] = {}
 
 def compact_context_history(context: list) -> list:
     """
-    Production-grade context history compaction:
-    1. Retains full tool outputs for the MOST RECENT turn so fresh data is preserved.
-    2. Strips redundant repeated [WORKSPACE STATUS] and [METADATA INDEX] blocks from older turns.
-    3. Truncates older tool outputs to concise summaries (~300 chars) so historical tool calls
-       remain in memory without cluttering the context window.
+    Tool outputs are now compressed to short task-aware notes AT THE SOURCE (see summarize_output /
+    run_task), so past turns no longer contain raw dumps that need reactive shrinking here. The one thing
+    still worth stripping from OLD turns is the per-turn [WORKSPACE] / [CAPABILITIES] reminder line - it's
+    only useful on the turn it was written for, and it repeats verbatim every step. trim_context() below
+    remains the real safety net for anything that still doesn't fit.
     """
     if len(context) <= 3:
         return context
@@ -142,40 +163,14 @@ def compact_context_history(context: list) -> list:
         i for i, m in enumerate(context)
         if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].startswith("TOOL RESULTS:")
     ]
-
     if len(tool_msg_indices) <= 1:
         return context
 
-    # Compact all tool result messages EXCEPT the most recent one
     for idx in tool_msg_indices[:-1]:
         msg_text = context[idx]["content"]
-
-        # Strip repeated workspace status & metadata index from past turns
-        for marker in ("\n\n[WORKSPACE STATUS]", "[WORKSPACE STATUS]"):
-            if marker in msg_text:
-                msg_text = msg_text.split(marker)[0]
-
-        # Compact long tool result blocks in past messages
-        lines = msg_text.splitlines()
-        compacted_lines = []
-        in_tool_block = False
-        block_chars = 0
-
-        for line in lines:
-            if line.startswith("--- task "):
-                in_tool_block = True
-                block_chars = 0
-                compacted_lines.append(line)
-            elif in_tool_block:
-                if block_chars < 300:
-                    compacted_lines.append(line)
-                    block_chars += len(line)
-                elif block_chars >= 300 and (not compacted_lines or not compacted_lines[-1].endswith("[older output truncated...]")):
-                    compacted_lines.append("... [older output truncated for context efficiency]")
-            else:
-                compacted_lines.append(line)
-
-        context[idx]["content"] = "\n".join(compacted_lines).strip()
+        if "\n\n[WORKSPACE]" in msg_text:
+            msg_text = msg_text.split("\n\n[WORKSPACE]")[0]
+        context[idx]["content"] = msg_text.strip()
 
     return context
 
@@ -522,12 +517,23 @@ def do_list_dir(t: dict) -> str:
     p = _safe(t.get("path", "."))
     if not p.is_dir():
         return f"ERROR: not a directory: {t.get('path')}"
+    shown_path = _rel(p)
     entries = [e for e in sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name.lower())) if e.name not in INTERNAL_DIRS]
     if not entries:
-        return "(empty directory)"
-    lines = [f"{'[dir] ' if e.is_dir() else '      '}{e.name}" + (f"  ({e.stat().st_size} bytes)" if e.is_file() else "") for e in entries[:500]]
+        return f"Contents of \"{shown_path}\": (empty directory)"
+    # Every listed name is DIRECTLY inside `shown_path` - nothing here is nested deeper. Each line also spells
+    # out the exact path to use with read_file/read_document/etc, so the model never has to reconstruct or
+    # guess a path from a bare file name plus a folder name it saw elsewhere in the same listing (that
+    # ambiguity is exactly what caused "ERROR: file not found" on files that were actually one level up).
+    lines = [f"Contents of \"{shown_path}\" (all items below are directly inside this folder, not nested further):"]
+    for e in entries[:500]:
+        full = f"{shown_path}/{e.name}" if shown_path != "." else e.name
+        if e.is_dir():
+            lines.append(f'  [dir]  "{full}"')
+        else:
+            lines.append(f'        "{full}"  ({e.stat().st_size} bytes)')
     if len(entries) > 500:
-        lines.append(f"...[{len(entries) - 500} more entries not shown; use search_files]")
+        lines.append(f"  ...[{len(entries) - 500} more entries not shown; use search_files]")
     return "\n".join(lines)
 
 
@@ -730,6 +736,16 @@ def format_interpreted(r: dict) -> str:
 
 def do_read_document(t: dict) -> str:
     p = _safe(t.get("path"))
+    if not p.is_file():
+        # Same failure mode read_file already guards against: the model guessed a path (often nesting the
+        # file under a folder it saw nearby in a list_dir result) that doesn't exist. Searching by bare file
+        # name across the whole workspace usually finds the real location in one step instead of the model
+        # retrying the same wrong path or giving up.
+        matches = [_rel(f) for f in _visible_files() if f.name == p.name]
+        if matches:
+            return f"ERROR: no file at '{t.get('path')}'. A file with that exact name exists at: {matches}. Use that path instead."
+        available = [_rel(f) for f in _visible_files()[:10]]
+        return f"ERROR: file '{t.get('path')}' does not exist inside LocalStorage. Available files: [{', '.join(available) if available else 'none'}]"
     options = {}
     rng = parse_page_range(t.get("pages"))
     if rng:
@@ -994,8 +1010,13 @@ def run_task(sess: Session, index: int, task: dict) -> tuple:
     emit(sess, "task", index=index, action=task["action"], message=task.get("message", ""), params={k: v for k, v in task.items() if k not in ("action", "message")})
     started = time.time()
     output = execute(sess, task)
-    emit(sess, "result", index=index, action=task["action"], output=output[:READ_LIMIT_CHARS], seconds=round(time.time() - started, 2))
-    return index, task, output
+    action = task["action"]
+    # Bulky/exploratory reads get compressed into a short, task-aware note (see summarize_output). The note is
+    # what the user sees live AND what lands in context - the raw output is never shown and never stored.
+    # Sandbox runs (run_python/run_shell) and short "OK: ..." writes are untouched, exactly as-is.
+    context_output = summarize_output(task.get("message", ""), action, output) if action in SUMMARIZE_ACTIONS else output
+    emit(sess, "result", index=index, action=action, output=context_output[:READ_LIMIT_CHARS], seconds=round(time.time() - started, 2))
+    return index, task, context_output
 
 
 def run_batch(sess: Session, tasks: list) -> list:
@@ -1016,26 +1037,58 @@ def run_batch(sess: Session, tasks: list) -> list:
     return results
 
 
-MAX_GAP_PATHS_SHOWN = 10   # keeps a huge cache/junk folder from bloating every single prompt
+MAX_GAP_PATHS_SHOWN = 10   # kept only for do_read_metadata's own gap listing, not for the per-turn note anymore
 
 
 def workspace_notes() -> str:
-    # Injected at the end of every user turn so the LLM always sees fresh information about the metadata index.
-    # PERF: this used to call _visible_files() (a full STORAGE.rglob("*") walk) once directly and AGAIN inside
-    # metadata_gaps(), plus load_metadata() a second time inside metadata_gaps() too - so every turn, including
-    # "hello", did two full filesystem walks (with a stat() per file) and parsed the metadata JSON twice, purely
-    # to build one status line. Now the tree is walked once and both results are reused.
-    files, meta = _visible_files(), load_metadata()
-    gaps = metadata_gaps(files=files, meta=meta)
-    note = f"[WORKSPACE STATUS] {len(files)} file(s) in LocalStorage. Metadata index: {'present, ' + str(len(meta)) + ' entries' if meta else 'NOT created yet'}."
-    if gaps:
-        shown = gaps[:MAX_GAP_PATHS_SHOWN]
-        note += f" MISSING METADATA for {len(gaps)} file(s), showing first {len(shown)}: {shown}{' ...(use search_files to see the rest, do not list them all)' if len(gaps) > MAX_GAP_PATHS_SHOWN else ''}."
+    # PERF + CONTEXT: this used to dump the ENTIRE metadata index (up to METADATA_PROMPT_LIMIT chars) plus a
+    # full gap list into EVERY user turn and EVERY tool-results turn, whether or not the LLM needed any of it -
+    # on a real project this alone could be most of the context window, every single step. The index is now
+    # something the LLM fetches on demand with the existing read_metadata action (see do_read_metadata above),
+    # which already reports gaps and truncates sanely. This note is now just a one-line reminder that the
+    # index exists and may be partial, so the model knows to check it instead of guessing or re-reading files
+    # it already has notes on. It's kept tiny and cheap: one metadata() existence check, no full directory walk.
+    meta = load_metadata()
     if meta:
-        text = json.dumps(meta, ensure_ascii=False)
-        note += "\n[METADATA INDEX]\n" + (text if len(text) <= METADATA_PROMPT_LIMIT else text[:METADATA_PROMPT_LIMIT] + "...[index truncated - use search_files or read_metadata]")
-    note += f"\n[CAPABILITIES] vision: {'available' if vision_enabled else 'NOT available'}."
+        note = f"[WORKSPACE] metadata index present ({len(meta)} entries, may not cover every file). Call read_metadata if you need it - do not assume it's complete or incomplete."
+    else:
+        note = "[WORKSPACE] no metadata index yet. Call read_metadata if you want to check, or read_file/read_document directly if you already know what you need."
+    note += f" [CAPABILITIES] vision: {'available' if vision_enabled else 'NOT available'}."
     return note
+
+
+def summarize_output(task_message: str, action: str, raw_output: str) -> str:
+    # Compresses ONE tool's raw output into a short, task-aware note before it ever reaches sess.context.
+    # This is the piece that replaces "dump everything, then shrink later" with "compress at the source".
+    # Kept out of the main agent loop's context entirely - it's its own tiny call, so it never pollutes
+    # or gets polluted by the agent's own running conversation.
+    if raw_output.startswith("ERROR") or raw_output.startswith("DENIED"):
+        return raw_output    # errors are already short and the agent needs the exact text to react correctly
+    if len(raw_output) <= SUMMARY_SKIP_CHARS:
+        return raw_output    # not worth a model round-trip
+    clipped = raw_output[:SUMMARY_INPUT_CHARS]
+    user_msg = f"TASK REASON: {task_message or action}\nACTION: {action}\nRAW OUTPUT:\n{clipped}"
+    # BUGFIX: a fixed 180-token budget was too tight for wordy sources (vision descriptions especially) -
+    # the grammar-constrained call was getting cut off with finish_reason "length" before it could close
+    # the JSON object, json.loads() then threw, and the previous code silently swallowed that exception,
+    # so every such failure showed up to the user as a mid-sentence truncation with no way to tell why.
+    # Scale the budget with input size (capped) and actually try again once before giving up.
+    token_budget = min(SUMMARY_MAX_TOKENS * 2, max(SUMMARY_MAX_TOKENS, len(clipped) // 20))
+    for attempt in range(2):
+        try:
+            with model_lock:
+                out = qwen.create_chat_completion(
+                    messages=[{"role": "system", "content": SUMMARIZER_SYSTEM_PROMPT}, {"role": "user", "content": user_msg}],
+                    grammar=load_grammar(SUMMARY_GRAMMAR), temperature=0.1, max_tokens=token_budget)
+            content = out["choices"][0]["message"]["content"]
+            summary = json.loads(content)["summary"].strip()
+            return summary or raw_output[:SUMMARY_SKIP_CHARS]
+        except Exception as e:
+            print(f"[summarize_output] attempt {attempt + 1} failed for action={action!r}: {type(e).__name__}: {e}", file=sys.stderr)
+            token_budget = min(token_budget * 2, MAX_OUTPUT_TOKENS)   # give the retry more room, in case it was a length cutoff
+    # Both attempts failed - fall back to a hard truncation of the raw text, but now we've LOGGED why on
+    # the server's stderr, so this is diagnosable instead of a silent mystery in the transcript.
+    return raw_output[:SUMMARY_SKIP_CHARS] + "...[summary failed, truncated]"
 
 
 def ask_model(context: list, temperature: float) -> list:
